@@ -1,0 +1,58 @@
+import Foundation
+import SwiftUI
+
+struct AppSettings: Codable, Equatable {
+    var lmStudioBaseURL = "http://192.168.4.181:1234/v1"
+    var lmStudioModel = "qwen/qwen3-4b-2507"
+    var asrPythonPath = "~/local-asr/mlx-whisper/.venv/bin/python"
+    var asrModel = "mlx-community/whisper-large-v3-turbo"
+    var asrModelCachePath = "models/huggingface"
+    var inputLanguage = "auto"
+    var targetLanguage = "Simplified Chinese"
+    var asrHost = "127.0.0.1"
+    var asrPort = 8765
+    var chunkDurationSeconds = 1.0
+    var contextWindowSeconds = 3.0
+    var translationTimeoutSeconds = 5.0
+    var subtitleFontSize = 36.0
+    var subtitleOpacity = 0.82
+    var subtitleMaxLines = 2
+    var subtitleMousePassthrough = true
+
+    static let defaultsKey = "RealtimeTranslator.AppSettings"
+
+    static func load() -> AppSettings {
+        guard let data = UserDefaults.standard.data(forKey: defaultsKey) else {
+            return AppSettings()
+        }
+
+        do {
+            return try JSONDecoder().decode(AppSettings.self, from: data)
+        } catch {
+            return AppSettings()
+        }
+    }
+
+    func save() {
+        guard let data = try? JSONEncoder().encode(self) else { return }
+        UserDefaults.standard.set(data, forKey: Self.defaultsKey)
+    }
+
+    var expandedASRPythonPath: String {
+        (asrPythonPath as NSString).expandingTildeInPath
+    }
+
+    func resolvedASRModelCachePath(relativeTo baseDirectory: URL?) -> String {
+        let expanded = (asrModelCachePath as NSString).expandingTildeInPath
+        if expanded.hasPrefix("/") {
+            return expanded
+        }
+
+        let baseDirectory = baseDirectory ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        return baseDirectory.appendingPathComponent(expanded).standardizedFileURL.path
+    }
+
+    var asrServiceURL: URL {
+        URL(string: "http://\(asrHost):\(asrPort)")!
+    }
+}
