@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var appState: AppState
+    @State private var isShowingSaveConfirmation = false
 
     private let inputLanguageOptions = [
         LanguageOption(label: "Auto Detect", value: "auto"),
@@ -50,11 +51,6 @@ struct SettingsView: View {
                     .labelsHidden()
                     .pickerStyle(.menu)
                     .frame(width: 220)
-                }
-                HStack {
-                    Text("Service Port")
-                    TextField("Port", value: $appState.settings.asrPort, format: .number)
-                        .frame(width: 90)
                 }
                 HStack {
                     Text("Request Timeout")
@@ -113,11 +109,17 @@ struct SettingsView: View {
 
             Button("Save Settings") {
                 appState.saveSettings()
+                isShowingSaveConfirmation = true
             }
             .keyboardShortcut(.defaultAction)
         }
         .padding(24)
         .frame(width: 520)
+        .alert("Settings Saved", isPresented: $isShowingSaveConfirmation) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Your settings have been saved.")
+        }
     }
 
     private func options(_ options: [LanguageOption], including currentValue: String) -> [LanguageOption] {

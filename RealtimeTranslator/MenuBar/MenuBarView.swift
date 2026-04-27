@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct MenuBarView: View {
@@ -47,6 +48,7 @@ struct MenuBarView: View {
 
             Button("设置...") {
                 openSettings()
+                bringSettingsWindowToFront()
             }
 
             Button("退出") {
@@ -55,5 +57,18 @@ struct MenuBarView: View {
         }
         .padding(.vertical, 4)
         .frame(width: 300)
+    }
+
+    private func bringSettingsWindowToFront() {
+        DispatchQueue.main.async {
+            NSApplication.shared.activate()
+
+            NSApplication.shared.windows
+                .filter { $0.canBecomeKey && !$0.isMiniaturized }
+                .forEach { window in
+                    window.makeKeyAndOrderFront(nil)
+                    window.orderFrontRegardless()
+                }
+        }
     }
 }

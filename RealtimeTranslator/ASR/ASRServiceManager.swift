@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 final class ASRServiceManager {
@@ -10,6 +11,7 @@ final class ASRServiceManager {
         case startupTimedOut
         case serviceOwnershipMismatch
         case transcriptionTimedOut(Double)
+        case noAvailablePort
 
         var errorDescription: String? {
             switch self {
@@ -29,6 +31,8 @@ final class ASRServiceManager {
                 return "ASR 服务端口被旧进程占用，请退出 RealtimeTranslator 后重试"
             case .transcriptionTimedOut(let seconds):
                 return "ASR 转写超过 \(Int(seconds)) 秒未返回，已重启 ASR 服务"
+            case .noAvailablePort:
+                return "无法启动 ASR 服务：没有可用的本地端口"
             }
         }
     }
@@ -58,6 +62,7 @@ final class ASRServiceManager {
     private let settings: AppSettings
     private var process: Process?
     private var ownerToken = UUID().uuidString
+    private var selectedASRPort: Int?
 
     init(settings: AppSettings) {
         self.settings = settings
@@ -87,7 +92,13 @@ final class ASRServiceManager {
         } catch {
             throw ASRError.modelCacheUnavailable(modelCachePath, error.localizedDescription)
         }
-        await terminateStaleServiceIfNeeded()
+        await terminateStaleServiceIfNeeded(port: AppSettings.defaultASRPort)
+        let selectedASRPort = try Self.availablePort(
+            host: settings.asrHost,
+            startingAt: AppSettings.defaultASRPort,
+            attempts: 100
+        )
+        self.selectedASRPort = selectedASRPort
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: pythonPath)
@@ -96,7 +107,7 @@ final class ASRServiceManager {
             "--model", settings.asrModel,
             "--language", settings.inputLanguage,
             "--host", settings.asrHost,
-            "--port", String(settings.asrPort),
+            "--port", String(selectedASRPort),
             "--owner-token", ownerToken,
             "--request-timeout", String(settings.asrRequestTimeoutSeconds)
         ]
@@ -119,6 +130,7 @@ final class ASRServiceManager {
     func stop() {
         terminateProcess()
         process = nil
+        selectedASRPort = nil
     }
 
     func transcribe(audioURL: URL, requestID: String) async throws -> TranscriptionResponse {
@@ -152,7 +164,7 @@ final class ASRServiceManager {
     }
 
     private func waitUntilHealthy() async throws {
-        let url = settings.asrServiceURL.appendingPathComponent("health")
+        let url = try asrServiceURL().appendingPathComponent("health")
         let deadline = ContinuousClock.now.advanced(by: .seconds(60))
 
         while ContinuousClock.now < deadline {
@@ -182,14 +194,14 @@ final class ASRServiceManager {
         throw ASRError.startupTimedOut
     }
 
-    private func terminateStaleServiceIfNeeded() async {
-        guard await isServiceResponding() else { return }
+    private func terminateStaleServiceIfNeeded(port: Int) async {
+        guard await isServiceResponding(port: port) else { return }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
         process.arguments = [
             "-f",
-            "asr_service.py.*--port \(settings.asrPort)"
+            "asr_service.py.*--port \(port)"
         ]
 
         do {
@@ -201,8 +213,8 @@ final class ASRServiceManager {
         }
     }
 
-    private func isServiceResponding() async -> Bool {
-        let url = settings.asrServiceURL.appendingPathComponent("health")
+    private func isServiceResponding(port: Int) async -> Bool {
+        let url = Self.asrServiceURL(host: settings.asrHost, port: port).appendingPathComponent("health")
         var request = URLRequest(url: url)
         request.timeoutInterval = 1
 
@@ -215,7 +227,7 @@ final class ASRServiceManager {
     }
 
     private func performTranscription(audioURL: URL, requestID: String) async throws -> TranscriptionResponse {
-        let url = settings.asrServiceURL.appendingPathComponent("transcribe")
+        let url = try asrServiceURL().appendingPathComponent("transcribe")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = max(1, settings.asrRequestTimeoutSeconds)
@@ -240,11 +252,56 @@ final class ASRServiceManager {
         return try JSONDecoder().decode(TranscriptionResponse.self, from: data)
     }
 
+    private func asrServiceURL() throws -> URL {
+        guard let selectedASRPort else {
+            throw ASRError.noAvailablePort
+        }
+
+        return Self.asrServiceURL(host: settings.asrHost, port: selectedASRPort)
+    }
+
+    private static func asrServiceURL(host: String, port: Int) -> URL {
+        URL(string: "http://\(host):\(port)")!
+    }
+
     private func terminateProcess() {
         guard let process else { return }
 
         if process.isRunning {
             process.terminate()
+        }
+    }
+
+    private static func availablePort(host: String, startingAt startPort: Int, attempts: Int) throws -> Int {
+        let firstPort = max(1, startPort)
+        let lastPort = min(65535, firstPort + max(0, attempts - 1))
+
+        for port in firstPort...lastPort {
+            if canBind(host: host, port: port) {
+                return port
+            }
+        }
+
+        throw ASRError.noAvailablePort
+    }
+
+    private static func canBind(host: String, port: Int) -> Bool {
+        let socketFileDescriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard socketFileDescriptor >= 0 else { return false }
+        defer { Darwin.close(socketFileDescriptor) }
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.stride)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(port).bigEndian
+        guard inet_pton(AF_INET, host, &address.sin_addr) == 1 else {
+            return false
+        }
+
+        return withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                Darwin.bind(socketFileDescriptor, socketAddress, socklen_t(MemoryLayout<sockaddr_in>.stride)) == 0
+            }
         }
     }
 

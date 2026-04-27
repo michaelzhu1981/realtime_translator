@@ -3,6 +3,7 @@ import SwiftUI
 
 struct AppSettings: Codable, Equatable {
     static let defaultASRModelCachePath = "~/Library/Caches/RealtimeTranslator/huggingface"
+    static let defaultASRPort = 8765
 
     var lmStudioBaseURL = "http://192.168.4.181:1234/v1"
     var lmStudioModel = "qwen/qwen3-4b-2507"
@@ -12,7 +13,6 @@ struct AppSettings: Codable, Equatable {
     var inputLanguage = "auto"
     var targetLanguage = "Simplified Chinese"
     var asrHost = "127.0.0.1"
-    var asrPort = 8765
     var asrRequestTimeoutSeconds = 30.0
     var chunkDurationSeconds = 1.0
     var contextWindowSeconds = 3.0
@@ -60,10 +60,6 @@ struct AppSettings: Codable, Equatable {
 
         let baseDirectory = baseDirectory ?? Self.defaultWritableCacheDirectory
         return baseDirectory.appendingPathComponent(expanded).standardizedFileURL.path
-    }
-
-    var asrServiceURL: URL {
-        URL(string: "http://\(asrHost):\(asrPort)")!
     }
 
     private static var defaultWritableCacheDirectory: URL {
