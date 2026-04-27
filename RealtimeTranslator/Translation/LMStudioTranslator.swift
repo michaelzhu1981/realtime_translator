@@ -1,6 +1,13 @@
 import Foundation
 
 final class LMStudioTranslator {
+    struct TranslationContext {
+        let recentSourceText: String
+        let recentTranslationText: String
+
+        static let empty = TranslationContext(recentSourceText: "", recentTranslationText: "")
+    }
+
     enum TranslationError: LocalizedError {
         case invalidBaseURL
         case badResponse(Int)
@@ -79,7 +86,7 @@ final class LMStudioTranslator {
         }
     }
 
-    func translate(_ sourceText: String) async throws -> String {
+    func translate(_ sourceText: String, context: TranslationContext = .empty) async throws -> String {
         guard let url = chatCompletionsURL() else {
             throw TranslationError.invalidBaseURL
         }
@@ -88,7 +95,7 @@ final class LMStudioTranslator {
         request.httpMethod = "POST"
         request.timeoutInterval = settings.translationTimeoutSeconds
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(chatRequest(sourceText: sourceText, stream: false))
+        request.httpBody = try JSONEncoder().encode(chatRequest(sourceText: sourceText, context: context, stream: false))
 
         let (data, response) = try await Self.perform {
             try await URLSession.shared.data(for: request)
@@ -107,6 +114,7 @@ final class LMStudioTranslator {
 
     func translateStreaming(
         _ sourceText: String,
+        context: TranslationContext = .empty,
         onPartial: @escaping @Sendable (String) -> Void
     ) async throws -> String {
         guard let url = URL(string: settings.lmStudioBaseURL)?.appendingPathComponent("chat/completions") else {
@@ -117,7 +125,7 @@ final class LMStudioTranslator {
         request.httpMethod = "POST"
         request.timeoutInterval = settings.translationTimeoutSeconds
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(chatRequest(sourceText: sourceText, stream: true))
+        request.httpBody = try JSONEncoder().encode(chatRequest(sourceText: sourceText, context: context, stream: true))
 
         let (bytes, response) = try await Self.perform {
             try await URLSession.shared.bytes(for: request)
@@ -156,12 +164,12 @@ final class LMStudioTranslator {
                 return partial
             }
 
-            return try await translate(sourceText)
+            return try await translate(sourceText, context: context)
         }
 
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            return try await translate(sourceText)
+            return try await translate(sourceText, context: context)
         }
         return trimmed
     }
@@ -185,22 +193,36 @@ final class LMStudioTranslator {
         }
     }
 
-    private func chatRequest(sourceText: String, stream: Bool) -> ChatRequest {
+    private func chatRequest(sourceText: String, context: TranslationContext, stream: Bool) -> ChatRequest {
         let systemPrompt = """
         You are a real-time subtitle translator.
-        Translate the user's input into natural \(settings.targetLanguage).
-        Only output the translated subtitle.
+        Translate only the NEW_TEXT field into natural \(settings.targetLanguage).
+        Use RECENT_SOURCE and RECENT_TRANSLATION only for context and terminology.
+        Do not repeat, continue, summarize, or rewrite RECENT_TRANSLATION.
+        Only output the translated subtitle for NEW_TEXT.
         Keep it concise and suitable for on-screen subtitles.
         Do not explain.
         Do not think step by step.
         Do not include the source text.
+        """
+        let userPrompt = """
+        RECENT_SOURCE:
+        \(context.recentSourceText)
+
+        RECENT_TRANSLATION:
+        \(context.recentTranslationText)
+
+        NEW_TEXT:
+        \(sourceText)
+
+        /no_think
         """
 
         return ChatRequest(
             model: settings.lmStudioModel,
             messages: [
                 .init(role: "system", content: systemPrompt),
-                .init(role: "user", content: "\(sourceText)\n\n/no_think")
+                .init(role: "user", content: userPrompt)
             ],
             temperature: 0.2,
             max_tokens: 96,
