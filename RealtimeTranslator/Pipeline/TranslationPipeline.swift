@@ -172,7 +172,7 @@ final class TranslationPipeline {
             guard let sourceUpdate = textStabilizer.accept(transcription.text) else { return }
 
             let measuredASRLatency = asrStart.duration(to: .now).milliseconds
-            eventHandler(.sourceText(sourceUpdate.committedText, latencyMS: max(transcription.durationMS, measuredASRLatency)))
+            eventHandler(.sourceText(sourceUpdate.newText, latencyMS: max(transcription.durationMS, measuredASRLatency)))
 
             let commits = sentenceCommitter.accept(sourceUpdate.newText)
             for commit in commits {
