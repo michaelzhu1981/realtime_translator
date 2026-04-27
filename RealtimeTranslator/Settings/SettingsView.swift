@@ -56,6 +56,12 @@ struct SettingsView: View {
                     TextField("Port", value: $appState.settings.asrPort, format: .number)
                         .frame(width: 90)
                 }
+                HStack {
+                    Text("Request Timeout")
+                    TextField("Seconds", value: $appState.settings.asrRequestTimeoutSeconds, format: .number)
+                        .frame(width: 90)
+                    Text("s")
+                }
             }
 
             Section("Translation") {

@@ -19,16 +19,6 @@ struct MenuBarView: View {
             }
             .keyboardShortcut("t", modifiers: [.control, .option, .command])
 
-            Button("显示/隐藏字幕窗") {
-                appState.toggleSubtitleWindow()
-            }
-            .keyboardShortcut("s", modifiers: [.control, .option, .command])
-
-            Button(appState.settings.subtitleMousePassthrough ? "解锁字幕窗" : "锁定字幕窗") {
-                appState.toggleWindowLock()
-            }
-            .keyboardShortcut("l", modifiers: [.control, .option, .command])
-
             Button("清空当前字幕") {
                 appState.clearSubtitle()
             }

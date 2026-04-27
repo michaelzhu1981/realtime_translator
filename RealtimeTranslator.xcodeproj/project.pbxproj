@@ -383,6 +383,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Realtime Translator connects to LM Studio on your local network for translation.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Realtime Translator captures local audio for speech recognition.";
 				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "Realtime Translator captures Safari audio for local subtitle translation.";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -409,6 +410,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Realtime Translator connects to LM Studio on your local network for translation.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Realtime Translator captures local audio for speech recognition.";
 				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "Realtime Translator captures Safari audio for local subtitle translation.";
 				LD_RUNPATH_SEARCH_PATHS = (

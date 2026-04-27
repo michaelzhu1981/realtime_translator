@@ -4,6 +4,8 @@ final class LMStudioTranslator {
     enum TranslationError: LocalizedError {
         case invalidBaseURL
         case badResponse(Int)
+        case networkUnavailable(String)
+        case requestFailed(String)
         case emptyOutput
 
         var errorDescription: String? {
@@ -12,6 +14,10 @@ final class LMStudioTranslator {
                 return "LM Studio Base URL 无效"
             case .badResponse(let code):
                 return "LM Studio 返回错误：HTTP \(code)"
+            case .networkUnavailable(let url):
+                return "无法连接 LM Studio：\(url)。请确认 Mac 已连接网络、LM Studio 正在运行并监听局域网地址，同时在系统设置 > 隐私与安全性 > 本地网络中允许 RealtimeTranslator。"
+            case .requestFailed(let reason):
+                return "LM Studio 请求失败：\(reason)"
             case .emptyOutput:
                 return "LM Studio 返回空译文"
             }
@@ -27,6 +33,7 @@ final class LMStudioTranslator {
         let model: String
         let messages: [Message]
         let temperature: Double
+        let max_tokens: Int
         let stream: Bool
     }
 
@@ -64,7 +71,9 @@ final class LMStudioTranslator {
         guard let url = URL(string: settings.lmStudioBaseURL)?.appendingPathComponent("models") else {
             throw TranslationError.invalidBaseURL
         }
-        let (_, response) = try await URLSession.shared.data(from: url)
+        let (_, response) = try await Self.perform {
+            try await URLSession.shared.data(from: url)
+        }
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw TranslationError.badResponse((response as? HTTPURLResponse)?.statusCode ?? -1)
         }
@@ -81,7 +90,9 @@ final class LMStudioTranslator {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(chatRequest(sourceText: sourceText, stream: false))
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await Self.perform {
+            try await URLSession.shared.data(for: request)
+        }
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw TranslationError.badResponse((response as? HTTPURLResponse)?.statusCode ?? -1)
         }
@@ -108,44 +119,70 @@ final class LMStudioTranslator {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(chatRequest(sourceText: sourceText, stream: true))
 
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        let (bytes, response) = try await Self.perform {
+            try await URLSession.shared.bytes(for: request)
+        }
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw TranslationError.badResponse((response as? HTTPURLResponse)?.statusCode ?? -1)
         }
 
         var output = ""
-        for try await line in bytes.lines {
-            guard let payload = Self.streamingPayload(from: line) else {
-                continue
-            }
-            if payload == "[DONE]" {
-                break
-            }
+        do {
+            for try await line in bytes.lines {
+                guard let payload = Self.streamingPayload(from: line) else {
+                    continue
+                }
+                if payload == "[DONE]" {
+                    break
+                }
 
-            guard let data = payload.data(using: .utf8),
-                  let decoded = try? JSONDecoder().decode(StreamingChatResponse.self, from: data),
-                  let content = decoded.choices.first?.delta?.content,
-                  !content.isEmpty
-            else {
-                continue
-            }
+                guard let data = payload.data(using: .utf8),
+                      let decoded = try? JSONDecoder().decode(StreamingChatResponse.self, from: data),
+                      let content = decoded.choices.first?.delta?.content,
+                      !content.isEmpty
+                else {
+                    continue
+                }
 
-            output += content
+                output += content
+                let partial = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !partial.isEmpty {
+                    onPartial(partial)
+                }
+            }
+        } catch {
             let partial = output.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !partial.isEmpty {
-                onPartial(partial)
+            guard partial.isEmpty else {
+                return partial
             }
+
+            return try await translate(sourceText)
         }
 
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            throw TranslationError.emptyOutput
+            return try await translate(sourceText)
         }
         return trimmed
     }
 
     private func chatCompletionsURL() -> URL? {
         URL(string: settings.lmStudioBaseURL)?.appendingPathComponent("chat/completions")
+    }
+
+    private static func perform<T>(_ operation: () async throws -> T) async throws -> T {
+        do {
+            return try await operation()
+        } catch let error as URLError {
+            switch error.code {
+            case .notConnectedToInternet, .networkConnectionLost, .cannotFindHost, .cannotConnectToHost, .timedOut:
+                throw TranslationError.networkUnavailable(error.failureURLString ?? "LM Studio")
+            default:
+                throw TranslationError.requestFailed(error.localizedDescription)
+            }
+        } catch {
+            throw TranslationError.requestFailed(error.localizedDescription)
+        }
     }
 
     private func chatRequest(sourceText: String, stream: Bool) -> ChatRequest {
@@ -155,6 +192,7 @@ final class LMStudioTranslator {
         Only output the translated subtitle.
         Keep it concise and suitable for on-screen subtitles.
         Do not explain.
+        Do not think step by step.
         Do not include the source text.
         """
 
@@ -162,9 +200,10 @@ final class LMStudioTranslator {
             model: settings.lmStudioModel,
             messages: [
                 .init(role: "system", content: systemPrompt),
-                .init(role: "user", content: sourceText)
+                .init(role: "user", content: "\(sourceText)\n\n/no_think")
             ],
             temperature: 0.2,
+            max_tokens: 96,
             stream: stream
         )
     }

@@ -56,6 +56,7 @@ final class AppState: ObservableObject {
     func start() {
         guard !isRunning else { return }
         runState = .checkingBackends
+        subtitleText = "正在启动翻译..."
         subtitleWindow.show(text: subtitleText, settings: settings)
 
         pipeline = TranslationPipeline(settings: settings) { [weak self] event in
@@ -125,6 +126,12 @@ final class AppState: ObservableObject {
             subtitleWindow.update(text: text, settings: settings)
         case .status(let state):
             runState = state
+        case .statusMessage(let message):
+            subtitleText = message
+            subtitleWindow.update(text: message, settings: settings)
+        case .browserWindowFrame(let frame):
+            subtitleWindow.updateTargetWindowFrame(frame)
+            subtitleWindow.update(text: subtitleText, settings: settings)
         case .error(let message):
             runState = .error(message)
             subtitleText = message

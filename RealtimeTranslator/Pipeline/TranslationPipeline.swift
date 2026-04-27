@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreGraphics
 import Foundation
 
 final class TranslationPipeline {
@@ -18,6 +19,8 @@ final class TranslationPipeline {
         case translationPartial(String)
         case translation(String, latencyMS: Int)
         case status(AppState.RunState)
+        case statusMessage(String)
+        case browserWindowFrame(CGRect)
         case error(String)
     }
 
@@ -28,8 +31,10 @@ final class TranslationPipeline {
     private let chunkWriter: AudioChunkWriter?
     private let textStabilizer = SourceTextStabilizer()
     private var capture: SafariAudioCapture?
-    private let processingLock = NSLock()
-    private var isProcessingChunk = false
+    private let queueLock = NSLock()
+    private var pendingChunks: [AudioChunkWriter.Chunk] = []
+    private var isProcessingQueue = false
+    private var isAcceptingChunks = false
 
     init(settings: AppSettings, eventHandler: @escaping @Sendable (Event) -> Void) {
         self.settings = settings
@@ -43,18 +48,34 @@ final class TranslationPipeline {
         guard chunkWriter != nil else {
             throw PipelineError.audioChunkWriterUnavailable
         }
+        setAcceptingChunks(true)
 
+        eventHandler(.statusMessage("正在启动 ASR 服务..."))
         try await asr.startIfNeeded()
+
+        eventHandler(.statusMessage("正在连接 LM Studio..."))
         try await translator.testConnection()
 
-        let capture = SafariAudioCapture { [weak self] sampleBuffer in
-            self?.handle(sampleBuffer: sampleBuffer)
-        }
+        eventHandler(.statusMessage("正在请求 Safari 音频捕获权限..."))
+
+        let capture = SafariAudioCapture(
+            audioHandler: { [weak self] sampleBuffer in
+                self?.handle(sampleBuffer: sampleBuffer)
+            },
+            diagnosticsHandler: { [eventHandler] message in
+                eventHandler(.error(message))
+            },
+            windowFrameHandler: { [eventHandler] frame in
+                eventHandler(.browserWindowFrame(frame))
+            }
+        )
         self.capture = capture
         try await capture.start()
     }
 
     func stop() async {
+        let chunksToRemove = stopAcceptingChunksAndDrainQueue()
+        chunksToRemove.forEach { chunkWriter?.remove($0) }
         await capture?.stop()
         capture = nil
         asr.stop()
@@ -64,21 +85,60 @@ final class TranslationPipeline {
         do {
             guard let chunkWriter else { return }
             guard let chunk = try chunkWriter.append(sampleBuffer) else { return }
-            Task {
-                await process(chunk)
+            guard enqueue(chunk) else {
+                chunkWriter.remove(chunk)
+                return
             }
         } catch {
             eventHandler(.error(error.localizedDescription))
         }
     }
 
-    private func process(_ chunk: AudioChunkWriter.Chunk) async {
-        guard beginProcessingChunk() else {
-            chunkWriter?.remove(chunk)
-            return
+    private func enqueue(_ chunk: AudioChunkWriter.Chunk) -> Bool {
+        queueLock.lock()
+        defer { queueLock.unlock() }
+
+        guard isAcceptingChunks else { return false }
+        pendingChunks.append(chunk)
+
+        guard !isProcessingQueue else { return true }
+        isProcessingQueue = true
+        Task {
+            await processQueuedChunks()
         }
+        return true
+    }
+
+    private func processQueuedChunks() async {
+        while let chunk = dequeue() {
+            await process(chunk)
+        }
+
+        queueLock.lock()
+        isProcessingQueue = false
+        let shouldRestart = isAcceptingChunks && !pendingChunks.isEmpty
+        if shouldRestart {
+            isProcessingQueue = true
+        }
+        queueLock.unlock()
+
+        if shouldRestart {
+            await processQueuedChunks()
+        }
+    }
+
+    private func dequeue() -> AudioChunkWriter.Chunk? {
+        queueLock.lock()
+        defer { queueLock.unlock() }
+
+        guard isAcceptingChunks, !pendingChunks.isEmpty else {
+            return nil
+        }
+        return pendingChunks.removeFirst()
+    }
+
+    private func process(_ chunk: AudioChunkWriter.Chunk) async {
         defer {
-            endProcessingChunk()
             chunkWriter?.remove(chunk)
         }
 
@@ -95,24 +155,27 @@ final class TranslationPipeline {
                 eventHandler(.translationPartial(partial))
             }
             eventHandler(.translation(output, latencyMS: translationStart.duration(to: .now).milliseconds))
+        } catch ASRServiceManager.ASRError.transcriptionTimedOut(let seconds) {
+            eventHandler(.statusMessage("ASR 超过 \(Int(seconds)) 秒未返回，已自动重启，等待下一段音频..."))
         } catch {
             eventHandler(.error(error.localizedDescription))
         }
     }
 
-    private func beginProcessingChunk() -> Bool {
-        processingLock.lock()
-        defer { processingLock.unlock() }
-
-        guard !isProcessingChunk else { return false }
-        isProcessingChunk = true
-        return true
+    private func setAcceptingChunks(_ isAccepting: Bool) {
+        queueLock.lock()
+        isAcceptingChunks = isAccepting
+        queueLock.unlock()
     }
 
-    private func endProcessingChunk() {
-        processingLock.lock()
-        isProcessingChunk = false
-        processingLock.unlock()
+    private func stopAcceptingChunksAndDrainQueue() -> [AudioChunkWriter.Chunk] {
+        queueLock.lock()
+        defer { queueLock.unlock() }
+
+        isAcceptingChunks = false
+        let chunks = pendingChunks
+        pendingChunks.removeAll()
+        return chunks
     }
 
     func translateFixtureText(_ sourceText: String) async {
