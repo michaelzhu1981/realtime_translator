@@ -26,7 +26,7 @@ struct MenuBarView: View {
             HStack {
                 Text("捕获窗口")
                 Spacer()
-                Button(appState.isRefreshingCaptureTargets ? "刷新中..." : "刷新") {
+                Button("刷新") {
                     appState.refreshCaptureTargets()
                 }
                 .disabled(appState.isRefreshingCaptureTargets || appState.isRunning)
@@ -98,11 +98,6 @@ struct MenuBarView: View {
         }
         .padding(.vertical, 4)
         .frame(width: 300)
-        .onAppear {
-            if appState.availableCaptureTargets.isEmpty {
-                appState.refreshCaptureTargets()
-            }
-        }
     }
 
     private func bringSettingsWindowToFront() {
