@@ -20,18 +20,19 @@ final class TranslationPipeline {
         case translation(String, latencyMS: Int)
         case status(AppState.RunState)
         case statusMessage(String)
-        case browserWindowFrame(CGRect)
+        case targetWindowFrame(CGRect)
         case error(String)
     }
 
     private let settings: AppSettings
+    private let captureTarget: CaptureTarget
     private let eventHandler: @Sendable (Event) -> Void
     private let asr: ASRServiceManager
     private let translator: LMStudioTranslator
     private let chunkWriter: AudioChunkWriter?
     private let textStabilizer = SourceTextStabilizer()
     private let sentenceCommitter = SentenceCommitter()
-    private var capture: SafariAudioCapture?
+    private var capture: WindowAudioCapture?
     private let queueLock = NSLock()
     private let maxPendingChunks = 2
     private var pendingChunks: [AudioChunkWriter.Chunk] = []
@@ -39,8 +40,9 @@ final class TranslationPipeline {
     private var isAcceptingChunks = false
     private var committedTranslationText = ""
 
-    init(settings: AppSettings, eventHandler: @escaping @Sendable (Event) -> Void) {
+    init(settings: AppSettings, captureTarget: CaptureTarget, eventHandler: @escaping @Sendable (Event) -> Void) {
         self.settings = settings
+        self.captureTarget = captureTarget
         self.eventHandler = eventHandler
         self.asr = ASRServiceManager(settings: settings)
         self.translator = LMStudioTranslator(settings: settings)
@@ -59,9 +61,10 @@ final class TranslationPipeline {
         eventHandler(.statusMessage("正在连接 LM Studio..."))
         try await translator.testConnection()
 
-        eventHandler(.statusMessage("正在请求 Safari 音频捕获权限..."))
+        eventHandler(.statusMessage("正在请求窗口音频捕获权限..."))
 
-        let capture = SafariAudioCapture(
+        let capture = WindowAudioCapture(
+            target: captureTarget,
             audioHandler: { [weak self] sampleBuffer in
                 self?.handle(sampleBuffer: sampleBuffer)
             },
@@ -69,7 +72,7 @@ final class TranslationPipeline {
                 eventHandler(.error(message))
             },
             windowFrameHandler: { [eventHandler] frame in
-                eventHandler(.browserWindowFrame(frame))
+                eventHandler(.targetWindowFrame(frame))
             }
         )
         self.capture = capture

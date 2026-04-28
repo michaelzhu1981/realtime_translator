@@ -35,13 +35,13 @@ final class AppState: ObservableObject {
     @Published var lastSourceText = ""
     @Published var lastASRLatencyMS: Int?
     @Published var lastTranslationLatencyMS: Int?
+    @Published private(set) var availableCaptureTargets: [CaptureTarget] = []
+    @Published private(set) var selectedCaptureTarget: CaptureTarget?
+    @Published private(set) var isRefreshingCaptureTargets = false
+    @Published private(set) var showsAllCaptureTargets = false
 
     private let subtitleWindow = SubtitlePanelController()
-    private lazy var pipeline = TranslationPipeline(settings: settings) { [weak self] event in
-        Task { @MainActor in
-            self?.handle(event)
-        }
-    }
+    private var pipeline: TranslationPipeline?
 
     var isRunning: Bool {
         if case .idle = runState {
@@ -55,22 +55,30 @@ final class AppState: ObservableObject {
 
     func start() {
         guard !isRunning else { return }
+        guard let selectedCaptureTarget else {
+            subtitleText = "请先选择要翻译的播放器窗口"
+            subtitleWindow.update(text: subtitleText, settings: settings)
+            refreshCaptureTargets()
+            return
+        }
+
         runState = .checkingBackends
         subtitleText = "正在启动翻译..."
         subtitleWindow.show(text: subtitleText, settings: settings)
 
-        pipeline = TranslationPipeline(settings: settings) { [weak self] event in
+        let pipeline = TranslationPipeline(settings: settings, captureTarget: selectedCaptureTarget) { [weak self] event in
             Task { @MainActor in
                 self?.handle(event)
             }
         }
+        self.pipeline = pipeline
 
         Task {
             do {
                 runState = .capturingAudio
                 try await pipeline.start()
                 runState = .running
-                subtitleText = "已启动，等待 Safari 音频"
+                subtitleText = "已启动，等待 \(selectedCaptureTarget.displayName) 音频"
                 subtitleWindow.update(text: subtitleText, settings: settings)
             } catch {
                 runState = .error(error.localizedDescription)
@@ -84,11 +92,52 @@ final class AppState: ObservableObject {
         guard isRunning else { return }
         runState = .stopping
         Task {
-            await pipeline.stop()
+            await pipeline?.stop()
+            pipeline = nil
             runState = .idle
             subtitleText = "已停止"
             subtitleWindow.update(text: subtitleText, settings: settings)
         }
+    }
+
+    func refreshCaptureTargets() {
+        guard !isRefreshingCaptureTargets else { return }
+        isRefreshingCaptureTargets = true
+
+        Task {
+            do {
+                let targets = try await CaptureTargetProvider.availableTargets(includeAllWindows: showsAllCaptureTargets)
+                availableCaptureTargets = targets
+
+                if let selectedCaptureTarget,
+                   let refreshedSelection = targets.first(where: { $0.id == selectedCaptureTarget.id }) {
+                    self.selectedCaptureTarget = refreshedSelection
+                } else {
+                    selectedCaptureTarget = targets.first
+                }
+
+                if targets.isEmpty {
+                    subtitleText = "未发现可捕获窗口，请先打开并显示播放器窗口"
+                    subtitleWindow.update(text: subtitleText, settings: settings)
+                }
+            } catch {
+                subtitleText = error.localizedDescription
+                subtitleWindow.update(text: subtitleText, settings: settings)
+            }
+
+            isRefreshingCaptureTargets = false
+        }
+    }
+
+    func selectCaptureTarget(_ target: CaptureTarget) {
+        selectedCaptureTarget = target
+        subtitleWindow.updateTargetWindowFrame(target.frame)
+        subtitleWindow.update(text: subtitleText, settings: settings)
+    }
+
+    func toggleShowsAllCaptureTargets() {
+        showsAllCaptureTargets.toggle()
+        refreshCaptureTargets()
     }
 
     func toggleSubtitleWindow() {
@@ -129,7 +178,7 @@ final class AppState: ObservableObject {
         case .statusMessage(let message):
             subtitleText = message
             subtitleWindow.update(text: message, settings: settings)
-        case .browserWindowFrame(let frame):
+        case .targetWindowFrame(let frame):
             subtitleWindow.updateTargetWindowFrame(frame)
             subtitleWindow.update(text: subtitleText, settings: settings)
         case .error(let message):

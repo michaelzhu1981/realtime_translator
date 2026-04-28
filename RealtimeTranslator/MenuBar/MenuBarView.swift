@@ -15,10 +15,51 @@ struct MenuBarView: View {
             Text("状态：\(appState.runState.label)")
                 .lineLimit(2)
 
-            Button(appState.isRunning ? "停止翻译" : "开始翻译 Safari") {
+            Button(appState.isRunning ? "停止翻译" : "开始翻译所选窗口") {
                 appState.isRunning ? appState.stop() : appState.start()
             }
             .keyboardShortcut("t", modifiers: [.control, .option, .command])
+            .disabled(!appState.isRunning && appState.selectedCaptureTarget == nil)
+
+            Divider()
+
+            HStack {
+                Text("捕获窗口")
+                Spacer()
+                Button(appState.isRefreshingCaptureTargets ? "刷新中..." : "刷新") {
+                    appState.refreshCaptureTargets()
+                }
+                .disabled(appState.isRefreshingCaptureTargets || appState.isRunning)
+            }
+
+            Button(appState.showsAllCaptureTargets ? "隐藏辅助/无标题窗口" : "显示全部可捕获窗口") {
+                appState.toggleShowsAllCaptureTargets()
+            }
+            .disabled(appState.isRefreshingCaptureTargets || appState.isRunning)
+
+            if let selected = appState.selectedCaptureTarget {
+                Text("当前：\(selected.displayName)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            } else {
+                Text("请先选择一个可捕获窗口")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if appState.availableCaptureTargets.isEmpty {
+                Text("暂无窗口。打开播放器窗口后点击刷新。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(appState.availableCaptureTargets) { target in
+                    Button("\(appState.selectedCaptureTarget?.id == target.id ? "✓ " : "")\(target.displayName)") {
+                        appState.selectCaptureTarget(target)
+                    }
+                    .disabled(appState.isRunning)
+                }
+            }
 
             Button("清空当前字幕") {
                 appState.clearSubtitle()
@@ -57,6 +98,11 @@ struct MenuBarView: View {
         }
         .padding(.vertical, 4)
         .frame(width: 300)
+        .onAppear {
+            if appState.availableCaptureTargets.isEmpty {
+                appState.refreshCaptureTargets()
+            }
+        }
     }
 
     private func bringSettingsWindowToFront() {
