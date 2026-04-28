@@ -182,7 +182,7 @@ final class TranslationPipeline {
                 try await translateCommittedSourceText(commit.text, sourceContext: sourceUpdate.contextText)
             }
         } catch ASRServiceManager.ASRError.transcriptionTimedOut(let seconds) {
-            eventHandler(.statusMessage("ASR 超过 \(Int(seconds)) 秒未返回，已自动重启，等待下一段音频..."))
+            AppLogger.asr.error("ASR exceeded \(Int(seconds)) seconds without a response; waiting for next audio chunk")
         } catch {
             eventHandler(.error(error.localizedDescription))
         }

@@ -20,7 +20,7 @@ struct SubtitleView: View {
     @ObservedObject var model: SubtitleContentModel
 
     var body: some View {
-        Text(model.text.isEmpty ? "字幕窗已显示" : model.text)
+        Text(model.text)
             .font(.system(size: model.settings.subtitleFontSize, weight: .semibold))
             .foregroundStyle(.white)
             .multilineTextAlignment(.center)

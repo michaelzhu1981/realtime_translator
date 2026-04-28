@@ -42,6 +42,7 @@ final class AppState: ObservableObject {
 
     private let subtitleWindow = SubtitlePanelController()
     private var pipeline: TranslationPipeline?
+    private var subtitleAutoClearTask: Task<Void, Never>?
 
     var isRunning: Bool {
         if case .idle = runState {
@@ -82,8 +83,6 @@ final class AppState: ObservableObject {
                 subtitleWindow.update(text: subtitleText, settings: settings)
             } catch {
                 runState = .error(error.localizedDescription)
-                subtitleText = "启动失败：\(error.localizedDescription)"
-                subtitleWindow.update(text: subtitleText, settings: settings)
             }
         }
     }
@@ -91,6 +90,7 @@ final class AppState: ObservableObject {
     func stop() {
         guard isRunning else { return }
         runState = .stopping
+        subtitleAutoClearTask?.cancel()
         Task {
             await pipeline?.stop()
             pipeline = nil
@@ -121,8 +121,7 @@ final class AppState: ObservableObject {
                     subtitleWindow.update(text: subtitleText, settings: settings)
                 }
             } catch {
-                subtitleText = error.localizedDescription
-                subtitleWindow.update(text: subtitleText, settings: settings)
+                runState = .error(error.localizedDescription)
             }
 
             isRefreshingCaptureTargets = false
@@ -151,6 +150,7 @@ final class AppState: ObservableObject {
     }
 
     func clearSubtitle() {
+        subtitleAutoClearTask?.cancel()
         subtitleText = ""
         lastSourceText = ""
         subtitleWindow.update(text: subtitleText, settings: settings)
@@ -169,10 +169,12 @@ final class AppState: ObservableObject {
         case .translationPartial(let text):
             subtitleText = text
             subtitleWindow.update(text: text, settings: settings)
+            scheduleSubtitleAutoClear(for: text)
         case .translation(let text, let latencyMS):
             subtitleText = text
             lastTranslationLatencyMS = latencyMS
             subtitleWindow.update(text: text, settings: settings)
+            scheduleSubtitleAutoClear(for: text)
         case .status(let state):
             runState = state
         case .statusMessage(let message):
@@ -183,8 +185,22 @@ final class AppState: ObservableObject {
             subtitleWindow.update(text: subtitleText, settings: settings)
         case .error(let message):
             runState = .error(message)
-            subtitleText = message
-            subtitleWindow.update(text: message, settings: settings)
+        }
+    }
+
+    private func scheduleSubtitleAutoClear(for text: String) {
+        subtitleAutoClearTask?.cancel()
+        guard !text.isEmpty else { return }
+
+        subtitleAutoClearTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                guard let self, self.subtitleText == text else { return }
+                self.subtitleText = ""
+                self.subtitleWindow.update(text: self.subtitleText, settings: self.settings)
+            }
         }
     }
 }
