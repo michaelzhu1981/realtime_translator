@@ -39,6 +39,7 @@ final class TranslationPipeline {
     private var isProcessingQueue = false
     private var isAcceptingChunks = false
     private var committedTranslationText = ""
+    private var recentSourceCommits: [String] = []
 
     init(settings: AppSettings, captureTarget: CaptureTarget, eventHandler: @escaping @Sendable (Event) -> Void) {
         self.settings = settings
@@ -181,10 +182,16 @@ final class TranslationPipeline {
             guard let sourceUpdate = textStabilizer.accept(transcription.text) else { return }
 
             let measuredASRLatency = asrStart.duration(to: .now).milliseconds
+            AppLogger.translation.info("sourceUpdate.newText=\(Self.logText(sourceUpdate.newText), privacy: .public)")
             eventHandler(.sourceText(sourceUpdate.newText, latencyMS: max(transcription.durationMS, measuredASRLatency)))
 
             let commits = sentenceCommitter.accept(sourceUpdate.newText)
             for commit in commits {
+                AppLogger.translation.info("commit.text=\(Self.logText(commit.text), privacy: .public)")
+                guard shouldTranslateCommit(commit.text) else {
+                    AppLogger.translation.info("commit.skip reason=recentDuplicate text=\(Self.logText(commit.text), privacy: .public)")
+                    continue
+                }
                 try await translateCommittedSourceText(commit.text, sourceContext: sourceUpdate.contextText)
             }
         } catch ASRServiceManager.ASRError.transcriptionTimedOut(let seconds) {
@@ -203,8 +210,26 @@ final class TranslationPipeline {
         let output = try await translator.translateStreaming(sourceText, context: context) { [eventHandler] partial in
             eventHandler(.translationPartial(partial))
         }
+        AppLogger.translation.info("translation.output=\(Self.logText(output), privacy: .public)")
         committedTranslationText = Self.mergeSubtitle(committedTranslationText, output)
         eventHandler(.translation(output, latencyMS: translationStart.duration(to: .now).milliseconds))
+    }
+
+    private func shouldTranslateCommit(_ text: String) -> Bool {
+        let normalized = Self.normalizedSourceCommit(text)
+        guard !normalized.isEmpty else { return false }
+
+        if recentSourceCommits.contains(where: { recent in
+            recent == normalized || (normalized.count >= 8 && recent.contains(normalized))
+        }) {
+            return false
+        }
+
+        recentSourceCommits.append(normalized)
+        if recentSourceCommits.count > 8 {
+            recentSourceCommits.removeFirst(recentSourceCommits.count - 8)
+        }
+        return true
     }
 
     private func setAcceptingChunks(_ isAccepting: Bool) {
@@ -342,6 +367,29 @@ final class TranslationPipeline {
             .suffix(maxLines)
             .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func logText(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let maxLength = 300
+        guard trimmed.count > maxLength else {
+            return "\(trimmed) [chars=\(trimmed.count)]"
+        }
+
+        return "\(String(trimmed.prefix(maxLength)))... [chars=\(trimmed.count)]"
+    }
+
+    private static func normalizedSourceCommit(_ text: String) -> String {
+        text
+            .lowercased()
+            .unicodeScalars
+            .filter { scalar in
+                !CharacterSet.whitespacesAndNewlines.contains(scalar)
+                    && !CharacterSet.punctuationCharacters.contains(scalar)
+                    && !CharacterSet.symbols.contains(scalar)
+            }
+            .map(String.init)
+            .joined()
     }
 
     func translateFixtureText(_ sourceText: String) async {
@@ -697,6 +745,7 @@ private final class SentenceCommitter {
     private let maxTokenCount = 28
     private let weakPunctuationMinimumTokenCount = 8
     private let minimumCharacterCount = 2
+    private let minimumTimedCommitTokenCount = 5
     private var buffer = ""
     private var bufferStartedAt: ContinuousClock.Instant?
     private var lastAppendAt: ContinuousClock.Instant?
@@ -708,16 +757,18 @@ private final class SentenceCommitter {
         }
 
         var commits: [Commit] = []
-        if shouldCommitForPause(now: now), let commit = drainBuffer() {
+        if shouldCommitForPause(now: now), let commit = drainBuffer(minimumTokenCount: minimumTimedCommitTokenCount) {
             commits.append(commit)
         }
 
         append(trimmed, now: now)
         commits.append(contentsOf: drainStrongSentences(now: now))
 
-        if shouldCommitWeakClause(), let commit = drainBuffer() {
+        if shouldCommitWeakClause(), let commit = drainBuffer(minimumTokenCount: weakPunctuationMinimumTokenCount) {
             commits.append(commit)
-        } else if shouldCommitForAge(now: now) || shouldCommitForLength(), let commit = drainBuffer() {
+        } else if shouldCommitForAge(now: now), let commit = drainBuffer(minimumTokenCount: minimumTimedCommitTokenCount) {
+            commits.append(commit)
+        } else if shouldCommitForLength(), let commit = drainBuffer(minimumTokenCount: minimumCharacterCount) {
             commits.append(commit)
         }
 
@@ -726,16 +777,17 @@ private final class SentenceCommitter {
     }
 
     private func append(_ text: String, now: ContinuousClock.Instant) {
+        let text = Self.trimmingLeadingWeakPunctuation(from: text)
+        guard !text.isEmpty else { return }
+
         if bufferStartedAt == nil {
             bufferStartedAt = now
         }
 
         if buffer.isEmpty {
             buffer = text
-        } else if Self.shouldJoinWithoutSpace(buffer, text) {
-            buffer += text
         } else {
-            buffer += " " + text
+            buffer = Self.mergedText(buffer, with: text)
         }
     }
 
@@ -775,7 +827,7 @@ private final class SentenceCommitter {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             buffer = String(buffer[endIndex...])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if sentence.count >= minimumCharacterCount {
+            if Self.commitIsReady(sentence, minimumTokenCount: 1) {
                 commits.append(Commit(text: sentence))
             }
         }
@@ -789,16 +841,87 @@ private final class SentenceCommitter {
         return commits
     }
 
-    private func drainBuffer() -> Commit? {
+    private func drainBuffer(minimumTokenCount: Int) -> Commit? {
         let text = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
-        buffer = ""
-        bufferStartedAt = nil
-
-        guard text.count >= minimumCharacterCount else {
+        guard Self.commitIsReady(text, minimumTokenCount: minimumTokenCount) else {
             return nil
         }
 
+        buffer = ""
+        bufferStartedAt = nil
+
         return Commit(text: text)
+    }
+
+    private static func commitIsReady(_ text: String, minimumTokenCount: Int) -> Bool {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.count >= 2, tokenCount(text) >= minimumTokenCount else {
+            return false
+        }
+
+        guard let first = text.unicodeScalars.first, let last = text.unicodeScalars.last else {
+            return false
+        }
+
+        if weakTerminators.contains(first) || first == "." || first == "?" || first == "!" {
+            return false
+        }
+        if last == "-" || last == "—" || last == "–" {
+            return false
+        }
+
+        if incompleteStandalonePhrases.contains(normalizedCommitText(text)) {
+            return false
+        }
+
+        return true
+    }
+
+    private static func trimmingLeadingWeakPunctuation(from text: String) -> String {
+        String(
+            text
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .drop { character in
+                    character.unicodeScalars.allSatisfy { scalar in
+                        CharacterSet.whitespacesAndNewlines.contains(scalar)
+                            || weakTerminators.contains(scalar)
+                    }
+                }
+        )
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func mergedText(_ existing: String, with addition: String) -> String {
+        let existingNormalized = normalizedCommitText(existing)
+        let additionNormalized = normalizedCommitText(addition)
+
+        if !existingNormalized.isEmpty,
+           additionNormalized.hasPrefix(existingNormalized),
+           additionNormalized.count > existingNormalized.count {
+            return addition
+        }
+
+        if !additionNormalized.isEmpty, existingNormalized.hasSuffix(additionNormalized) {
+            return existing
+        }
+
+        if shouldJoinWithoutSpace(existing, addition) {
+            return existing + addition
+        }
+        return existing + " " + addition
+    }
+
+    private static func normalizedCommitText(_ text: String) -> String {
+        text
+            .lowercased()
+            .unicodeScalars
+            .filter { scalar in
+                !CharacterSet.whitespacesAndNewlines.contains(scalar)
+                    && !CharacterSet.punctuationCharacters.contains(scalar)
+                    && !CharacterSet.symbols.contains(scalar)
+            }
+            .map(String.init)
+            .joined()
     }
 
     private static func firstStrongTerminatorEndIndex(in text: String) -> String.Index? {
@@ -852,6 +975,13 @@ private final class SentenceCommitter {
 
     private static let strongTerminators = Set("。！？.!?".unicodeScalars)
     private static let weakTerminators = Set("，,；;：:、".unicodeScalars)
+    private static let incompleteStandalonePhrases: Set<String> = [
+        "whichis",
+        "thatis",
+        "thatssomething",
+        "youknow",
+        "okay"
+    ]
 }
 
 private extension Duration {

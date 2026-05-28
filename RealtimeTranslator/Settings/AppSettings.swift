@@ -19,7 +19,8 @@ struct AppSettings: Codable, Equatable {
     var translationTimeoutSeconds = 60.0
     var subtitleFontSize = 36.0
     var subtitleOpacity = 0.82
-    var subtitleMaxLines = 2
+    var subtitleMaxLines = 4
+    var subtitleMinimumVisibleSeconds = 1.5
     var subtitleMousePassthrough = true
 
     static let defaultsKey = "RealtimeTranslator.AppSettings"

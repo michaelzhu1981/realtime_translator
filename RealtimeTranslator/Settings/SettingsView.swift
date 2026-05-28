@@ -103,7 +103,13 @@ struct SettingsView: View {
                 Slider(value: $appState.settings.subtitleOpacity, in: 0.2...1.0) {
                     Text("Opacity")
                 }
-                Stepper("Max Lines: \(appState.settings.subtitleMaxLines)", value: $appState.settings.subtitleMaxLines, in: 1...4)
+                Stepper("Max Lines: \(appState.settings.subtitleMaxLines)", value: $appState.settings.subtitleMaxLines, in: 1...8)
+                HStack {
+                    Text("Minimum Visible")
+                    TextField("Seconds", value: $appState.settings.subtitleMinimumVisibleSeconds, format: .number)
+                        .frame(width: 90)
+                    Text("s")
+                }
                 Toggle("Mouse Passthrough", isOn: $appState.settings.subtitleMousePassthrough)
             }
 
