@@ -130,17 +130,23 @@ final class TranslationPipeline {
             await process(chunk)
         }
 
+        let shouldRestart = finishProcessingQueue()
+
+        if shouldRestart {
+            await processQueuedChunks()
+        }
+    }
+
+    private func finishProcessingQueue() -> Bool {
         queueLock.lock()
+        defer { queueLock.unlock() }
+
         isProcessingQueue = false
         let shouldRestart = isAcceptingChunks && !pendingChunks.isEmpty
         if shouldRestart {
             isProcessingQueue = true
         }
-        queueLock.unlock()
-
-        if shouldRestart {
-            await processQueuedChunks()
-        }
+        return shouldRestart
     }
 
     private func dequeue() -> AudioChunkWriter.Chunk? {
